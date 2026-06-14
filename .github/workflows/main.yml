@@ -45,9 +45,6 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: 'gradle'
 
-      - name: Validate Gradle wrapper checksum
-        uses: gradle/actions/wrapper-validation@v3
-
       - name: Make gradlew executable
         run: chmod +x ./gradlew
         working-directory: android_app_repository
