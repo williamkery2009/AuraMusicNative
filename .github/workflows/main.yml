@@ -1,46 +1,229 @@
-name: Aura Music Android Production Build
+name: Aura Music — Android Debug Build
 
 on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Custom release notes (optional)'
+        required: false
+        default: ''
+
+# Only one pipeline at a time per branch/tag
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'zulu'
+  GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.caching=true'
 
 jobs:
-  build-android:
-    name: Build Android Release Artifacts
+  # ──────────────────────────────────────────────
+  # JOB 1: Validate & Run Unit Tests
+  # ──────────────────────────────────────────────
+  validate:
+    name: Validate & Test
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup JDK 17
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: 17
-          cache: gradle
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'
 
-      - name: Grant Gradle Execute Permission
+      - name: Validate Gradle wrapper checksum
+        uses: gradle/actions/wrapper-validation@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
         working-directory: android_app_repository
-        run: chmod +x gradlew
 
-      - name: Build Release APK
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
         working-directory: android_app_repository
-        run: ./gradlew assembleRelease --no-daemon
 
-      - name: Build Release App Bundle
+      - name: Run Android Lint
+        run: ./gradlew lintDebug --no-daemon
         working-directory: android_app_repository
-        run: ./gradlew bundleRelease --no-daemon
 
-      - name: Upload Release APK
+      - name: Upload lint report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Aura-Release-APK
-          path: android_app_repository/app/build/outputs/apk/release/*.apk
-          retention-days: 30
+          name: lint-report
+          path: android_app_repository/app/build/reports/lint-results-debug.html
+          retention-days: 14
 
-      - name: Upload Release AAB
+  # ──────────────────────────────────────────────
+  # JOB 2: Build Debug APK
+  # ──────────────────────────────────────────────
+  build:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    needs: validate
+
+    outputs:
+      version_name: ${{ steps.version.outputs.name }}
+      version_code: ${{ steps.version.outputs.code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+        working-directory: android_app_repository
+
+      - name: Extract version info
+        id: version
+        working-directory: android_app_repository
+        run: |
+          VERSION_NAME=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VERSION_CODE=$(grep 'versionCode' app/build.gradle.kts | head -1 | grep -o '[0-9]*')
+          echo "name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION_NAME ($VERSION_CODE)"
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --no-daemon
+        working-directory: android_app_repository
+
+      - name: Rename APK
+        id: rename
+        run: |
+          SRC="android_app_repository/app/build/outputs/apk/debug/app-debug.apk"
+          DEST="android_app_repository/app/build/outputs/apk/debug/AuraMusic-${{ steps.version.outputs.name }}-debug.apk"
+          mv "$SRC" "$DEST"
+          echo "apk=$DEST" >> $GITHUB_OUTPUT
+
+      - name: Generate SHA-256 checksum
+        run: |
+          sha256sum "${{ steps.rename.outputs.apk }}" > checksums.txt
+          cat checksums.txt
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aura-Release-AAB
-          path: android_app_repository/app/build/outputs/bundle/release/*.aab
+          name: AuraMusic-${{ steps.version.outputs.name }}-debug
+          path: ${{ steps.rename.outputs.apk }}
           retention-days: 30
+
+      - name: Upload checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: checksums.txt
+          retention-days: 30
+
+  # ──────────────────────────────────────────────
+  # JOB 3: Publish GitHub Release (tag pushes only)
+  # ──────────────────────────────────────────────
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: AuraMusic-${{ needs.build.outputs.version_name }}-debug
+          path: ./release-artifacts
+
+      - name: Download checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: checksums
+          path: ./release-artifacts
+
+      - name: Build release notes
+        run: |
+          CUSTOM="${{ github.event.inputs.release_notes }}"
+          TAG="${{ github.ref_name }}"
+          VERSION="${{ needs.build.outputs.version_name }}"
+          CODE="${{ needs.build.outputs.version_code }}"
+
+          cat <<EOF > release_notes.md
+          ## Aura Music $TAG — Debug Build
+
+          **Version:** $VERSION (build $CODE)
+          **Min Android:** 8.0 (API 26) · **Target:** Android 15 (API 35)
+
+          > ⚠️ This is a debug build — for testing and development only. Not for production use.
+
+          ### What's in this release
+          ${CUSTOM:-"See commit history for changes in this release."}
+
+          ### Artifacts
+          | File | Description |
+          |------|-------------|
+          | \`AuraMusic-$VERSION-debug.apk\` | Sideloadable debug APK |
+          | \`checksums.txt\` | SHA-256 checksum for verification |
+
+          ### Install
+          \`\`\`bash
+          adb install AuraMusic-$VERSION-debug.apk
+          \`\`\`
+
+          ### Verify integrity
+          \`\`\`bash
+          sha256sum -c checksums.txt
+          \`\`\`
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Aura Music ${{ github.ref_name }} (Debug)
+          body_path: release_notes.md
+          draft: false
+          prerelease: true
+          files: |
+            ./release-artifacts/*.apk
+            ./release-artifacts/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ──────────────────────────────────────────────
+  # JOB 4: Notify on failure
+  # ──────────────────────────────────────────────
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [validate, build, release]
+    if: failure()
+
+    steps:
+      - name: Report failure summary
+        run: |
+          echo "::error::Aura Music debug build pipeline failed for ${{ github.ref_name }}"
+          echo "::error::Check the failed job above for details."
