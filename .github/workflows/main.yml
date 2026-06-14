@@ -14,7 +14,6 @@ on:
         required: false
         default: ''
 
-# Only one pipeline at a time per branch/tag
 concurrency:
   group: android-build-${{ github.ref }}
   cancel-in-progress: true
@@ -47,22 +46,19 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
-        working-directory: android_app_repository
 
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
-        working-directory: android_app_repository
 
       - name: Run Android Lint
         run: ./gradlew lintDebug --no-daemon
-        working-directory: android_app_repository
 
       - name: Upload lint report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lint-report
-          path: android_app_repository/app/build/reports/lint-results-debug.html
+          path: app/build/reports/lint-results-debug.html
           retention-days: 14
 
   # ──────────────────────────────────────────────
@@ -92,11 +88,9 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
-        working-directory: android_app_repository
 
       - name: Extract version info
         id: version
-        working-directory: android_app_repository
         run: |
           VERSION_NAME=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
           VERSION_CODE=$(grep 'versionCode' app/build.gradle.kts | head -1 | grep -o '[0-9]*')
@@ -106,13 +100,12 @@ jobs:
 
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --no-daemon
-        working-directory: android_app_repository
 
       - name: Rename APK
         id: rename
         run: |
-          SRC="android_app_repository/app/build/outputs/apk/debug/app-debug.apk"
-          DEST="android_app_repository/app/build/outputs/apk/debug/AuraMusic-${{ steps.version.outputs.name }}-debug.apk"
+          SRC="app/build/outputs/apk/debug/app-debug.apk"
+          DEST="app/build/outputs/apk/debug/AuraMusic-${{ steps.version.outputs.name }}-debug.apk"
           mv "$SRC" "$DEST"
           echo "apk=$DEST" >> $GITHUB_OUTPUT
 
@@ -175,18 +168,12 @@ jobs:
           **Version:** $VERSION (build $CODE)
           **Min Android:** 8.0 (API 26) · **Target:** Android 15 (API 35)
 
-          > ⚠️ This is a debug build — for testing and development only. Not for production use.
+          > ⚠️ Debug build — for testing only, not for production use.
 
           ### What's in this release
           ${CUSTOM:-"See commit history for changes in this release."}
 
-          ### Artifacts
-          | File | Description |
-          |------|-------------|
-          | \`AuraMusic-$VERSION-debug.apk\` | Sideloadable debug APK |
-          | \`checksums.txt\` | SHA-256 checksum for verification |
-
-          ### Install
+          ### Install via ADB
           \`\`\`bash
           adb install AuraMusic-$VERSION-debug.apk
           \`\`\`
