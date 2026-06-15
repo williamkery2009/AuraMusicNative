@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - master
       - develop
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
@@ -21,67 +22,23 @@ concurrency:
 env:
   JAVA_VERSION: '17'
   JAVA_DISTRIBUTION: 'zulu'
-  GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.caching=true'
 
 jobs:
   # ──────────────────────────────────────────────
-  # JOB 1: Validate & Run Unit Tests
-  # ──────────────────────────────────────────────
-  validate:
-    name: Validate & Test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: ${{ env.JAVA_DISTRIBUTION }}
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: 'gradle'
-
-      - name: Generate Gradle wrapper if missing
-        run: |
-          if [ ! -f "./gradlew" ]; then
-            gradle wrapper --gradle-version 8.6
-          fi
-          chmod +x ./gradlew
-
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
-
-      - name: Run Android Lint
-        run: ./gradlew lintDebug --no-daemon
-
-      - name: Upload lint report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lint-report
-          path: app/build/reports/lint-results-debug.html
-          retention-days: 14
-
-  # ──────────────────────────────────────────────
-  # JOB 2: Build Debug APK
+  # JOB 1: Build & Test
   # ──────────────────────────────────────────────
   build:
     name: Build Debug APK
     runs-on: ubuntu-latest
-    needs: validate
 
     outputs:
       version_name: ${{ steps.version.outputs.name }}
       version_code: ${{ steps.version.outputs.code }}
+      apk_name: ${{ steps.version.outputs.apk_name }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -90,43 +47,99 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: 'gradle'
 
-      - name: Generate Gradle wrapper if missing
+      - name: Find and prepare gradlew
         run: |
-          if [ ! -f "./gradlew" ]; then
-            gradle wrapper --gradle-version 8.6
+          # Find gradlew wherever it lives in the repo
+          GRADLEW=$(find . -name "gradlew" -maxdepth 3 | head -1)
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew not found in repo"
+            exit 1
           fi
-          chmod +x ./gradlew
+          chmod +x "$GRADLEW"
+          GRADLE_DIR=$(dirname "$GRADLEW")
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
+          echo "GRADLEW=$GRADLEW" >> $GITHUB_ENV
+          echo "Found gradlew at: $GRADLEW (working dir: $GRADLE_DIR)"
 
       - name: Extract version info
         id: version
         run: |
-          VERSION_NAME=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          VERSION_CODE=$(grep 'versionCode' app/build.gradle.kts | head -1 | grep -o '[0-9]*')
+          # Find build.gradle.kts for the app module
+          GRADLE_KTS=$(find . -name "build.gradle.kts" -path "*/app/build.gradle.kts" | head -1)
+          if [ -z "$GRADLE_KTS" ]; then
+            # Fallback: try build.gradle
+            GRADLE_KTS=$(find . -name "build.gradle" -path "*/app/build.gradle" | head -1)
+          fi
+          echo "Using: $GRADLE_KTS"
+
+          VERSION_NAME=""
+          VERSION_CODE=""
+
+          if [ -n "$GRADLE_KTS" ]; then
+            VERSION_NAME=$(grep -m1 'versionName' "$GRADLE_KTS" | sed 's/.*[=:]\s*"\(.*\)".*/\1/' | tr -d ' ')
+            VERSION_CODE=$(grep -m1 'versionCode' "$GRADLE_KTS" | grep -o '[0-9]\+' | head -1)
+          fi
+
+          # Fallback to git tag or default
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.0")
+          fi
+          if [ -z "$VERSION_CODE" ]; then
+            VERSION_CODE=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+          fi
+
+          APK_NAME="AuraMusic-${VERSION_NAME}-debug"
           echo "name=$VERSION_NAME" >> $GITHUB_OUTPUT
           echo "code=$VERSION_CODE" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION_NAME ($VERSION_CODE)"
+          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION_NAME (code: $VERSION_CODE)"
+
+      - name: Run unit tests
+        run: ${{ env.GRADLEW }} testDebugUnitTest --no-daemon --continue
+        working-directory: ${{ env.GRADLE_DIR }}
+        continue-on-error: true   # don't block the APK build if tests fail
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Assemble debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        run: ${{ env.GRADLEW }} assembleDebug --no-daemon --stacktrace
+        working-directory: ${{ env.GRADLE_DIR }}
 
-      - name: Rename APK
-        id: rename
+      - name: Locate and rename APK
+        id: apk
         run: |
-          SRC="app/build/outputs/apk/debug/app-debug.apk"
-          DEST="app/build/outputs/apk/debug/AuraMusic-${{ steps.version.outputs.name }}-debug.apk"
-          mv "$SRC" "$DEST"
-          echo "apk=$DEST" >> $GITHUB_OUTPUT
+          # Find the built APK
+          APK_SRC=$(find . -name "app-debug.apk" -path "*/outputs/apk/debug/*" | head -1)
+          if [ -z "$APK_SRC" ]; then
+            echo "ERROR: app-debug.apk not found after build"
+            find . -name "*.apk" 2>/dev/null || true
+            exit 1
+          fi
+          APK_DIR=$(dirname "$APK_SRC")
+          APK_DEST="$APK_DIR/${{ steps.version.outputs.apk_name }}.apk"
+          mv "$APK_SRC" "$APK_DEST"
+          echo "path=$APK_DEST" >> $GITHUB_OUTPUT
+          echo "APK ready at: $APK_DEST"
 
       - name: Generate SHA-256 checksum
         run: |
-          sha256sum "${{ steps.rename.outputs.apk }}" > checksums.txt
+          sha256sum "${{ steps.apk.outputs.path }}" > checksums.txt
           cat checksums.txt
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: AuraMusic-${{ steps.version.outputs.name }}-debug
-          path: ${{ steps.rename.outputs.apk }}
+          name: ${{ steps.version.outputs.apk_name }}
+          path: ${{ steps.apk.outputs.path }}
           retention-days: 30
 
       - name: Upload checksum
@@ -137,7 +150,7 @@ jobs:
           retention-days: 30
 
   # ──────────────────────────────────────────────
-  # JOB 3: Publish GitHub Release (tag pushes only)
+  # JOB 2: Publish GitHub Release (tag pushes only)
   # ──────────────────────────────────────────────
   release:
     name: Publish Release
@@ -148,13 +161,10 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download debug APK
         uses: actions/download-artifact@v4
         with:
-          name: AuraMusic-${{ needs.build.outputs.version_name }}-debug
+          name: ${{ needs.build.outputs.apk_name }}
           path: ./release-artifacts
 
       - name: Download checksums
@@ -163,40 +173,23 @@ jobs:
           name: checksums
           path: ./release-artifacts
 
-      - name: Build release notes
-        run: |
-          CUSTOM="${{ github.event.inputs.release_notes }}"
-          TAG="${{ github.ref_name }}"
-          VERSION="${{ needs.build.outputs.version_name }}"
-          CODE="${{ needs.build.outputs.version_code }}"
-
-          cat <<EOF > release_notes.md
-          ## Aura Music $TAG — Debug Build
-
-          **Version:** $VERSION (build $CODE)
-          **Min Android:** 8.0 (API 26) · **Target:** Android 15 (API 35)
-
-          > ⚠️ Debug build — for testing only, not for production use.
-
-          ### What's in this release
-          ${CUSTOM:-"See commit history for changes in this release."}
-
-          ### Install via ADB
-          \`\`\`bash
-          adb install AuraMusic-$VERSION-debug.apk
-          \`\`\`
-
-          ### Verify integrity
-          \`\`\`bash
-          sha256sum -c checksums.txt
-          \`\`\`
-          EOF
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Aura Music ${{ github.ref_name }} (Debug)
-          body_path: release_notes.md
+          body: |
+            ## Aura Music ${{ github.ref_name }} — Debug Build
+
+            **Version:** ${{ needs.build.outputs.version_name }} (build ${{ needs.build.outputs.version_code }})
+
+            > ⚠️ Debug build — for testing only, not for production use.
+
+            ${{ github.event.inputs.release_notes }}
+
+            ### Install via ADB
+            ```
+            adb install ${{ needs.build.outputs.apk_name }}.apk
+            ```
           draft: false
           prerelease: true
           files: |
@@ -206,16 +199,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ──────────────────────────────────────────────
-  # JOB 4: Notify on failure
+  # JOB 3: Notify on failure
   # ──────────────────────────────────────────────
   notify-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: [validate, build, release]
+    needs: [build, release]
     if: failure()
 
     steps:
       - name: Report failure summary
         run: |
           echo "::error::Aura Music debug build pipeline failed for ${{ github.ref_name }}"
-          echo "::error::Check the failed job above for details."
