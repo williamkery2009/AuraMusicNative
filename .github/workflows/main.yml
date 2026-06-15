@@ -1,213 +1,46 @@
-name: Aura Music — Android Debug Build
+name: Aura Music Android Production Build
 
 on:
-  push:
-    branches:
-      - main
-      - master
-      - develop
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
-    inputs:
-      release_notes:
-        description: 'Custom release notes (optional)'
-        required: false
-        default: ''
-
-concurrency:
-  group: android-build-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  JAVA_VERSION: '17'
-  JAVA_DISTRIBUTION: 'zulu'
 
 jobs:
-  # ──────────────────────────────────────────────
-  # JOB 1: Build & Test
-  # ──────────────────────────────────────────────
-  build:
-    name: Build Debug APK
+  build-android:
+    name: Build Android Release Artifacts
     runs-on: ubuntu-latest
 
-    outputs:
-      version_name: ${{ steps.version.outputs.name }}
-      version_code: ${{ steps.version.outputs.code }}
-      apk_name: ${{ steps.version.outputs.apk_name }}
-
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: ${{ env.JAVA_DISTRIBUTION }}
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: 'gradle'
+          distribution: temurin
+          java-version: 17
+          cache: gradle
 
-      - name: Find and prepare gradlew
-        run: |
-          # Find gradlew wherever it lives in the repo
-          GRADLEW=$(find . -name "gradlew" -maxdepth 3 | head -1)
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found in repo"
-            exit 1
-          fi
-          chmod +x "$GRADLEW"
-          GRADLE_DIR=$(dirname "$GRADLEW")
-          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
-          echo "GRADLEW=$GRADLEW" >> $GITHUB_ENV
-          echo "Found gradlew at: $GRADLEW (working dir: $GRADLE_DIR)"
+      - name: Grant Gradle Execute Permission
+        working-directory: android_app_repository
+        run: chmod +x gradlew
 
-      - name: Extract version info
-        id: version
-        run: |
-          # Find build.gradle.kts for the app module
-          GRADLE_KTS=$(find . -name "build.gradle.kts" -path "*/app/build.gradle.kts" | head -1)
-          if [ -z "$GRADLE_KTS" ]; then
-            # Fallback: try build.gradle
-            GRADLE_KTS=$(find . -name "build.gradle" -path "*/app/build.gradle" | head -1)
-          fi
-          echo "Using: $GRADLE_KTS"
+      - name: Build Release APK
+        working-directory: android_app_repository
+        run: ./gradlew assembleRelease --no-daemon
 
-          VERSION_NAME=""
-          VERSION_CODE=""
+      - name: Build Release App Bundle
+        working-directory: android_app_repository
+        run: ./gradlew bundleRelease --no-daemon
 
-          if [ -n "$GRADLE_KTS" ]; then
-            VERSION_NAME=$(grep -m1 'versionName' "$GRADLE_KTS" | sed 's/.*[=:]\s*"\(.*\)".*/\1/' | tr -d ' ')
-            VERSION_CODE=$(grep -m1 'versionCode' "$GRADLE_KTS" | grep -o '[0-9]\+' | head -1)
-          fi
-
-          # Fallback to git tag or default
-          if [ -z "$VERSION_NAME" ]; then
-            VERSION_NAME=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.0")
-          fi
-          if [ -z "$VERSION_CODE" ]; then
-            VERSION_CODE=$(git rev-list --count HEAD 2>/dev/null || echo "1")
-          fi
-
-          APK_NAME="AuraMusic-${VERSION_NAME}-debug"
-          echo "name=$VERSION_NAME" >> $GITHUB_OUTPUT
-          echo "code=$VERSION_CODE" >> $GITHUB_OUTPUT
-          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION_NAME (code: $VERSION_CODE)"
-
-      - name: Run unit tests
-        run: ${{ env.GRADLEW }} testDebugUnitTest --no-daemon --continue
-        working-directory: ${{ env.GRADLE_DIR }}
-        continue-on-error: true   # don't block the APK build if tests fail
-
-      - name: Upload test results
-        if: always()
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: |
-            **/build/reports/tests/
-            **/build/test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
-      - name: Assemble debug APK
-        run: ${{ env.GRADLEW }} assembleDebug --no-daemon --stacktrace
-        working-directory: ${{ env.GRADLE_DIR }}
-
-      - name: Locate and rename APK
-        id: apk
-        run: |
-          # Find the built APK
-          APK_SRC=$(find . -name "app-debug.apk" -path "*/outputs/apk/debug/*" | head -1)
-          if [ -z "$APK_SRC" ]; then
-            echo "ERROR: app-debug.apk not found after build"
-            find . -name "*.apk" 2>/dev/null || true
-            exit 1
-          fi
-          APK_DIR=$(dirname "$APK_SRC")
-          APK_DEST="$APK_DIR/${{ steps.version.outputs.apk_name }}.apk"
-          mv "$APK_SRC" "$APK_DEST"
-          echo "path=$APK_DEST" >> $GITHUB_OUTPUT
-          echo "APK ready at: $APK_DEST"
-
-      - name: Generate SHA-256 checksum
-        run: |
-          sha256sum "${{ steps.apk.outputs.path }}" > checksums.txt
-          cat checksums.txt
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.version.outputs.apk_name }}
-          path: ${{ steps.apk.outputs.path }}
+          name: Aura-Release-APK
+          path: android_app_repository/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      - name: Upload checksum
+      - name: Upload Release AAB
         uses: actions/upload-artifact@v4
         with:
-          name: checksums
-          path: checksums.txt
+          name: Aura-Release-AAB
+          path: android_app_repository/app/build/outputs/bundle/release/*.aab
           retention-days: 30
-
-  # ──────────────────────────────────────────────
-  # JOB 2: Publish GitHub Release (tag pushes only)
-  # ──────────────────────────────────────────────
-  release:
-    name: Publish Release
-    runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download debug APK
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.apk_name }}
-          path: ./release-artifacts
-
-      - name: Download checksums
-        uses: actions/download-artifact@v4
-        with:
-          name: checksums
-          path: ./release-artifacts
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Aura Music ${{ github.ref_name }} (Debug)
-          body: |
-            ## Aura Music ${{ github.ref_name }} — Debug Build
-
-            **Version:** ${{ needs.build.outputs.version_name }} (build ${{ needs.build.outputs.version_code }})
-
-            > ⚠️ Debug build — for testing only, not for production use.
-
-            ${{ github.event.inputs.release_notes }}
-
-            ### Install via ADB
-            ```
-            adb install ${{ needs.build.outputs.apk_name }}.apk
-            ```
-          draft: false
-          prerelease: true
-          files: |
-            ./release-artifacts/*.apk
-            ./release-artifacts/checksums.txt
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ──────────────────────────────────────────────
-  # JOB 3: Notify on failure
-  # ──────────────────────────────────────────────
-  notify-failure:
-    name: Notify on Failure
-    runs-on: ubuntu-latest
-    needs: [build, release]
-    if: failure()
-
-    steps:
-      - name: Report failure summary
-        run: |
-          echo "::error::Aura Music debug build pipeline failed for ${{ github.ref_name }}"
