@@ -44,8 +44,12 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: 'gradle'
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: Generate Gradle wrapper if missing
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            gradle wrapper --gradle-version 8.6
+          fi
+          chmod +x ./gradlew
 
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
@@ -86,8 +90,12 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: 'gradle'
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: Generate Gradle wrapper if missing
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            gradle wrapper --gradle-version 8.6
+          fi
+          chmod +x ./gradlew
 
       - name: Extract version info
         id: version
